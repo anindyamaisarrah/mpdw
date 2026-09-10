@@ -1,0 +1,235 @@
+---
+title: "tugas pertemuan 3"
+author: "Anindya Dinar M"
+date: "2026-09-09"
+output: html_document
+---
+
+
+### Impor & Pembagian Data
+Pada analisis ini, variabel AQI (Air Quality Index) ditetapkan sebagai variabel dependen atau Y, sedangkan PM2.5 dipilih sebagai variabel independen atau X. Pemilihan PM2.5 dilakukan karena PM2.5 merupakan salah satu polutan yang tersedia dalam dataset.
+
+```{r}
+library(readr)
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(car)
+
+data <- read.csv("C:\\SEM 5\\MPDW\\mpdw\\Pertemuan 3\\NewDelhi_Air_quality.csv")
+
+# Pilih Y = AQI dan X = PM2.5
+data2 <- data[, c("AQI", "pm25")]
+
+# Hapus missing value
+data2 <- na.omit(data2)
+
+# Pastikan numerik
+data2$AQI <- as.numeric(data2$AQI)
+data2$pm25 <- as.numeric(data2$pm25)
+
+# Split 80:20
+n <- nrow(data2)
+n_train <- floor(0.8 * n)
+
+train <- data2[1:n_train, ]
+test <- data2[(n_train + 1):n, ]
+
+# Cek
+nrow(train)
+nrow(test)
+names(train)
+names(test)
+```
+Data kemudian dibagi menjadi data latih sebesar 80% dan data uji sebesar 20%. Dari total 72 observasi, diperoleh 57 observasi sebagai data latih dan 15 observasi sebagai data uji.
+
+## 2. Model Koyck
+
+Model Koyck digunakan untuk melihat pengaruh PM2.5 terhadap AQI dengan mempertimbangkan adanya ketergantungan nilai AQI pada periode sebelumnya.
+
+### Pemodelan
+
+Pemodelan ini menggunakan fungsi `koyckDlm()`.
+
+```{r}
+# Membangun Model Koyck
+library(dLagM)
+
+model.koyck <- koyckDlm(
+  x = train$pm25,
+  y = train$AQI
+)
+
+model.koyck
+```
+
+**Interpretasi:** Model Koyck menunjukkan bahwa koefisien $AQI_{t-1}$ sebesar 0,8733 merupakan parameter $\lambda$, yang menunjukkan kuatnya pengaruh AQI pada periode sebelumnya terhadap AQI pada periode saat ini. Sementara itu, koefisien $PM2.5_t$ sebesar -0,5683 menunjukkan hubungan negatif antara PM2.5 pada periode saat ini dengan AQI setelah mempertimbangkan pengaruh AQI periode sebelumnya. Signifikansi kedua peubah tersebut ditentukan berdasarkan *p-value* masing-masing koefisien, dengan taraf signifikansi 5%.
+
+**Persamaan:**
+
+$$
+\hat{AQI}_t = 4{,}5491 + 0{,}8733AQI_{t-1} - 0{,}5683PM2.5_t
+$$
+
+### Peramalan
+
+```{r}
+# Meramalkan 5 periode ke depan
+# Peramalan sesuai jumlah data testing
+fore.koyck <- forecast(
+  model = model.koyck,
+  x = test$pm25,
+  h = nrow(test)
+)
+
+fore.koyck
+
+# MAPE
+library(MLmetrics)
+
+mape.koyck <- MAPE(
+  fore.koyck$forecasts,
+  test$AQI
+)
+
+cat("MAPE Model Koyck:", mape.koyck, "\n")
+```
+
+## 3. Regression with Distributed Lag (DLM)
+
+Selanjutnya digunakan Distributed Lag Model (DLM) untuk melihat pengaruh PM2.5 pada beberapa periode sebelumnya terhadap AQI.
+
+### Pemodelan (Lag = 2)
+
+Fungsi yang digunakan adalah `dlm()`. Parameter `q = 2` berarti kita memasukkan $X_t, X_{t-1}$, dan $X_{t-2}$.
+
+```{r}
+model.dlm <- dlm(x = train$pm25, y = train$AQI, q = 2)
+summary(model.dlm)
+```
+
+### Penentuan *Lag* Optimum
+
+Untuk menghindari coba-coba, kita bisa mencari nilai $q$ terbaik berdasarkan nilai *Akaike Information Criterion (AIC)* terkecil menggunakan fungsi `finiteDLMauto()`.
+
+```{r}
+finiteDLMauto(formula = AQI ~ pm25,
+              data = data.frame(train), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+
+**Interpretasi:** Pilih baris dengan nilai AIC yang paling kecil (negatif terbesar). Misalnya, lag optimum berada pada $q=10$, kita bangun ulang modelnya:
+
+```{r}
+# Membangun ulang DLM dengan Lag Optimum (q=6)
+model.dlm.opt <- dlm(x = train$pm25, y = train$AQI, q = 10)
+summary(model.dlm.opt)
+
+# Peramalan model DLM Optimum
+fore.dlm.opt <- forecast(model = model.dlm.opt, x = test$pm25, h = 15)
+mape.dlm.opt <- MAPE(fore.dlm.opt$forecasts, test$AQI)
+cat("MAPE Model DLM Optimum:", mape.dlm.opt, "\n")
+```
+
+## 4. Autoregressive Distributed Lag (ARDL)
+
+### Pemodelan
+
+```{r}
+# Model ARDL dengan lag X = 1 dan lag Y = 1
+model.ardl <- ardlDlm(formula = AQI ~ pm25, data = train, p = 1, q = 1)
+summary(model.ardl)
+```
+
+### *Lag* Optimum ARDL
+
+```{r}
+model.ardl.opt <- ardlBoundOrders(data = data.frame(data), ic = "AIC", formula = AQI ~ pm25)
+
+# Menarik kombinasi lag dengan AIC terkecil
+min_p <- c()
+for(i in 1:10){
+  min_p[i] <- min(model.ardl.opt$Stat.table[[i]])
+}
+q_opt <- which(min_p == min(min_p, na.rm = TRUE))
+p_opt <- which(model.ardl.opt$Stat.table[[q_opt]] == min(model.ardl.opt$Stat.table[[q_opt]], na.rm = TRUE))
+
+data.frame("Lag_Y_opt(q)" = q_opt, "Lag_X_opt(p)" = p_opt, "AIC" = model.ardl.opt$min.Stat)
+```
+
+```{r}
+# Peramalan ARDL awal (p=1, q=1)
+fore.ardl <- forecast(model = model.ardl, x = test$pm25, h = 15)
+mape.ardl <- MAPE(fore.ardl$forecasts, test$AQI)
+cat("MAPE Model ARDL (1,1):", mape.ardl, "\n")
+```
+
+## 5. Pendekatan dengan Library `dynlm` dan Uji Asumsi
+
+```{r}
+# Sama dengan DLM (q=1)
+cons_lm1 <- dynlm(AQI ~ pm25 + L(pm25), data = train.ts)
+
+# Setara dengan Model Autoregressive Murni (Hanya melibatkan pm25 dan AQI-1)
+cons_lm2 <- dynlm(AQI ~ pm25 + L(AQI), data = train.ts)
+
+# Sama dengan ARDL (p=1, q=1)
+cons_lm3 <- dynlm(AQI ~ pm25 + L(pm25) + L(AQI), data = train.ts)
+```
+
+### Uji Asumsi Model (Contoh pada cons_lm1)
+
+### 1. Uji Autokorelasi (Durbin-Watson)
+
+```{r}
+dwtest(cons_lm1)
+```
+Berdasarkan uji Durbin-Watson diperoleh nilai DW sebesar 0,62318 dengan *p-value* sebesar 0,0003038. Karena *p-value* $<0,05$, maka $H_0$ ditolak. Dengan demikian, terdapat autokorelasi positif pada residual model. Oleh karena itu, asumsi independensi residual belum terpenuhi.
+
+### 2. Uji Heteroskedastisitas (Breusch-Pagan)
+
+```{r}
+bptest(cons_lm1)
+```
+Berdasarkan uji Breusch-Pagan diperoleh nilai BP sebesar 1,0983 dengan *p-value* sebesar 0,5774. Karena *p-value* $>0,05$, maka $H_0$ tidak ditolak. Dengan demikian, tidak terdapat indikasi heteroskedastisitas pada residual, sehingga asumsi homoskedastisitas terpenuhi.
+
+### 3. Uji Normalitas (Shapiro-Wilk)
+```{r}
+shapiro.test(residuals(cons_lm1))
+```
+Berdasarkan uji Shapiro-Wilk diperoleh nilai $W=0,9342$ dengan *p-value* sebesar 0,349. Karena *p-value* $>0,05$, maka $H_0$ tidak ditolak. Dengan demikian, residual dapat dianggap berdistribusi normal sehingga asumsi normalitas terpenuhi.
+
+## 6. Perbandingan Performa Model
+
+### Akurasi
+
+```{r}
+# Ringkasan Akurasi
+akurasi <- matrix(c(mape.koyck, mape.dlm.opt, mape.ardl))
+row.names(akurasi) <- c("Koyck", "DLM Optimum", "ARDL (1,1)")
+colnames(akurasi) <- c("MAPE")
+print(akurasi)
+```
+Semakin kecil nilai MAPE, semakin baik kemampuan model dalam melakukan peramalan.
+
+Berdasarkan hasil tersebut, Koyck memiliki nilai MAPE paling kecil, yaitu 13,95%. DLM Optimum menghasilkan MAPE sebesar 14,42%, sedangkan ARDL (1,1) menghasilkan MAPE sebesar 15,44%.
+
+Dengan demikian, urutan kinerja model berdasarkan MAPE adalah:
+
+$$ \boxed{\text{Koyck} > \text{DLM Optimum} > \text{ARDL}} $$
+
+dengan Koyck sebagai model dengan kinerja peramalan terbaik.
+
+### Visualisasi Aktual vs Peramalan
+
+```{r}
+
+```
+**Interpretasi grafik:**
+Berdasarkan grafik, nilai AQI aktual mengalami fluktuasi yang cukup besar selama periode data uji, sedangkan hasil peramalan ketiga model cenderung lebih stabil. Model Koyck dan DLM Optimum terlihat lebih mampu mengikuti beberapa perubahan nilai aktual dibandingkan ARDL (1,1). Secara umum, ketiga model belum sepenuhnya mampu menangkap kenaikan dan penurunan ekstrem pada AQI aktual.
+
+
+**Kesimpulan:**
+
+Berdasarkan hasil analisis, penggunaan PM2.5 sebagai variabel independen untuk memodelkan AQI dengan pendekatan regresi berpeubah lag menunjukkan bahwa ketiga metode memiliki kemampuan yang berbeda dalam menghasilkan peramalan. DLM memperoleh lag optimum \(q=10\) berdasarkan nilai AIC terkecil sebesar 181,4052. Berdasarkan evaluasi asumsi, residual model yang diuji memenuhi asumsi normalitas dan homoskedastisitas, tetapi masih terdapat autokorelasi positif berdasarkan uji Durbin-Watson. Dari sisi peramalan, model Koyck memberikan hasil terbaik dengan MAPE sebesar 13,95%, diikuti DLM Optimum sebesar 14,42% dan ARDL (1,1) sebesar 15,44%. Grafik menunjukkan bahwa ketiga model cenderung lebih stabil dibandingkan AQI aktual yang mengalami fluktuasi cukup besar. Dengan demikian, Koyck dipilih sebagai model terbaik untuk peramalan AQI berdasarkan nilai MAPE terkecil.
